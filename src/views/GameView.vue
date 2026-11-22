@@ -1,648 +1,699 @@
 
 <script setup lang="ts">
-import { computed, ref } from 'vue';
-import ScratchModal from '../components/ScratchModal.vue';
-import { useGameStore } from '../stores/game';
-import type { Ticket } from '../types/game';
+import { computed, ref, watch, onBeforeUnmount } from "vue";
+import { LOTTERIES } from "../config/lottery";
+import { useGameStore } from "../stores/game";
+import type { PlayType } from "../types/game";
+import ScratchArea from "../components/ScratchArea.vue";
+import StatCard from "../components/StatCard.vue";
 
-const game = useGameStore();
+const store = useGameStore();
 
-const modalTicketId = ref<string | null>(null);
+const selectedLotteryId = ref("starter");
+const showPlayPicker = ref(false);
+const showScratchModal = ref(false);
+const showMoneyModal = ref(false);
+const insufficientLotteryId = ref("");
 
-const tickets = computed(() =>
-  [...game.state.tickets].reverse(),
-);
+// 固定当前正在展示的彩票 ID
+const activeTicketId = ref<string | null>(null);
 
-const modalTicket = computed(() =>
-  modalTicketId.value
-    ? game.state.tickets.find(
-        ticket => ticket.id === modalTicketId.value,
-      ) ?? null
-    : null,
-);
+// 根据 ID 获取彩票，不再依赖 currentTicket 的状态筛选
+const ticket = computed(() => {
+    if (activeTicketId.value) {
+        return (
+            store.game.tickets.find(
+                (item) => item.id === activeTicketId.value
+            ) ?? null
+        );
+    }
 
-/**
- * 效率天赋影响自动刮奖间隔。
- * 每级减少 5%，最低保留基础时间的 20%。
- */
-const autoScratchInterval = computed(() => {
-  if (!modalTicket.value) return 900;
-
-  const config = game.lotteries.find(
-    item => item.id === modalTicket.value!.gameId,
-  );
-
-  const base = config?.scratchDuration ?? 900;
-
-  const efficiencyLevel =
-    game.state.talents.efficiency ?? 0;
-
-  return Math.max(
-    100,
-    Math.ceil(
-      base * Math.max(
-        0.2,
-        1 - efficiencyLevel * 0.05,
-      ),
-    ),
-  );
+    return store.currentTicket;
 });
 
-function openTicket(ticket: Ticket) {
-  if (
-    ticket.status === 'purchased' ||
-    ticket.status === 'scratching' ||
-    ticket.status === 'scratched'
-  ) {
-    modalTicketId.value = ticket.id;
-  }
+const config = computed(
+    () =>
+        LOTTERIES.find((item) => item.id === selectedLotteryId.value) ??
+        LOTTERIES[1]
+);
+
+const insufficientLottery = computed(
+    () =>
+        LOTTERIES.find((item) => item.id === insufficientLotteryId.value) ??
+        config.value
+);
+
+const ticketConfig = computed(() =>
+    ticket.value
+        ? LOTTERIES.find((item) => item.id === ticket.value!.gameId) ??
+          config.value
+        : config.value
+);
+
+const playTypes: {
+    id: PlayType;
+    name: string;
+    description: string;
+    icon: string;
+}[] = [
+    {
+        id: "number-match",
+        name: "幸运数字",
+        description: "对照中奖号码，匹配即可获得对应奖金",
+        icon: "🔢"
+    },
+    {
+        id: "symbol-match",
+        name: "幸运图案",
+        description: "6 个图案中集齐 3 个相同图案",
+        icon: "🍀"
+    },
+    {
+        id: "three-match",
+        name: "三个相同",
+        description: "刮开 3 个数字，寻找相同数字",
+        icon: "🎯"
+    },
+    {
+        id: "line-match",
+        name: "连线大奖",
+        description: "在 2 行图案中寻找横向连线",
+        icon: "〰️"
+    },
+    {
+        id: "number-compare",
+        name: "数字比大小",
+        description: "比较你的数字和幸运数字",
+        icon: "⚖️"
+    },
+    {
+        id: "number-sum",
+        name: "数字求和",
+        description: "两个数字相加等于目标和",
+        icon: "➕"
+    },
+    {
+        id: "direct-prize",
+        name: "直接奖金",
+        description: "刮开一个区域，直接揭晓奖金",
+        icon: "💰"
+    },
+    {
+        id: "coordinate",
+        name: "幸运坐标",
+        description: "在 3×3 坐标格中寻找大奖",
+        icon: "🧭"
+    },
+    {
+        id: "step-walk",
+        name: "幸运步数",
+        description: "沿着 5 个路径节点抵达终点",
+        icon: "👣"
+    }
+];
+
+// 彩票展示数据
+const ticketValues = computed(() => {
+    const result = ticket.value?.result;
+
+    if (Array.isArray(result?.values)) {
+        return result.values as (string | number)[];
+    }
+
+    return ticket.value
+        ? [ticket.value.isWinner ? "🍀" : "—", ticket.value.prize, "★"]
+        : [];
+});
+
+// 每个中奖格对应的奖金
+const ticketPrizes = computed(() => {
+    const current = ticket.value;
+
+    if (!current || current.playType !== "number-match") {
+        return [];
+    }
+
+    const result = current.result;
+
+    if (Array.isArray(result.prizes)) {
+        return result.prizes as number[];
+    }
+
+    const matches = ticketValues.value
+        .slice(1)
+        .map((value, index) =>
+            value === result.target ? index : -1
+        )
+        .filter((index) => index >= 0);
+
+    const prizes = Array(6).fill(0) as number[];
+
+    if (matches.length) {
+        prizes[matches[0]] = current.prize;
+    }
+
+    return prizes;
+});
+
+const selectedPlayType = computed(
+    () => ticket.value?.playType ?? config.value.playType
+);
+
+const ticketTarget = computed<string | number | undefined>(() => {
+    const target = ticket.value?.result.target;
+
+    return typeof target === "string" || typeof target === "number"
+        ? target
+        : undefined;
+});
+
+// 更新刮奖区域进度
+function updateTicketCellProgress(index: number, value: number) {
+    const current = ticket.value;
+
+    if (!current) return;
+
+    store.updateCellProgress(current.id, index, value);
 }
 
-/**
- * 开始免费彩票。
- */
-function startFree() {
-  const result = game.startFreeTicket();
+// 页面滚动锁定
+let bodyScrollLocked = false;
+let lockedScrollY = 0;
 
-  if (!result.ok) {
-    game.notice = result.error;
-    return;
-  }
+function lockPageScroll(locked: boolean) {
+    if (locked && !bodyScrollLocked) {
+        lockedScrollY = window.scrollY;
 
-  modalTicketId.value = result.data.id;
+        document.body.style.position = "fixed";
+        document.body.style.top = `-${lockedScrollY}px`;
+        document.body.style.width = "100%";
+        document.body.style.overflow = "hidden";
+
+        bodyScrollLocked = true;
+    } else if (!locked && bodyScrollLocked) {
+        document.body.style.position = "";
+        document.body.style.top = "";
+        document.body.style.width = "";
+        document.body.style.overflow = "";
+
+        window.scrollTo(0, lockedScrollY);
+
+        bodyScrollLocked = false;
+    }
 }
 
-/**
- * 购买付费彩票。
- */
-function buy(gameId: string) {
-  const result = game.purchase(gameId);
+// 选择彩票
+function chooseLottery(id: string) {
+    const item = LOTTERIES.find((lottery) => lottery.id === id);
 
-  if (!result.ok) {
-    game.notice = result.error;
-    return;
-  }
+    if (!item) return;
 
-  modalTicketId.value = result.data.id;
+    if (item.price > store.game.coins) {
+        insufficientLotteryId.value = id;
+        showMoneyModal.value = true;
+        return;
+    }
+
+    selectedLotteryId.value = id;
+    showPlayPicker.value = true;
 }
 
-/**
- * 揭晓一个数字区域。
- */
+// 购买彩票
+function buy(playType: PlayType) {
+    if (config.value.price > store.game.coins) {
+        insufficientLotteryId.value = selectedLotteryId.value;
+        showPlayPicker.value = false;
+        showMoneyModal.value = true;
+        return;
+    }
+
+    store.buyLottery(selectedLotteryId.value, playType);
+
+    showPlayPicker.value = false;
+
+    // 新购买彩票后，固定这张彩票的 ID
+    const newTicket = store.game.tickets[0];
+
+    if (newTicket?.gameId === selectedLotteryId.value) {
+        activeTicketId.value = newTicket.id;
+        showScratchModal.value = true;
+    }
+}
+
+// 刮奖完成后的处理
+function finishScratchIfComplete() {
+    const current = ticket.value;
+
+    if (!current || current.status !== "scratched") {
+        return;
+    }
+
+    if (current.isWinner) {
+        // 自动提交验票，但不切换当前展示的彩票
+        store.submit(current.id);
+
+        // 只有真正提交成功才显示已提交提示
+        if (
+            ["queued", "verifying", "completed"].includes(current.status)
+        ) {
+            store.setNotice(
+                `🎉 恭喜中奖 ${current.prize.toLocaleString()} 金币，已自动提交验票！`
+            );
+        }
+    } else {
+        // 未中奖：保留弹窗，提示用户
+        store.setNotice("很遗憾，这次没有中奖，再试试下一张吧！");
+    }
+}
+
+// 刮开单个区域
 function reveal(index: number) {
-  if (!modalTicket.value) return;
+    const current = ticket.value;
 
-  const result = game.revealCell(
-    modalTicket.value.id,
-    index,
-  );
+    if (!current) return;
 
-  if (!result.ok) {
-    game.notice = result.error;
-  }
+    store.revealCell(current.id, index);
+
+    finishScratchIfComplete();
 }
 
-/**
- * 提交验票。
- */
-function submitCurrentTicket() {
-  if (!modalTicket.value) return;
+// 快速刮开全部
+function revealAll() {
+    const current = ticket.value;
 
-  const result = game.submitTicket(
-    modalTicket.value.id,
-  );
+    if (!current) return;
 
-  if (!result.ok) {
-    game.notice = result.error;
-    return;
-  }
+    store.revealAll(current.id);
 
-  modalTicketId.value = null;
+    finishScratchIfComplete();
 }
 
-function statusLabel(ticket: Ticket) {
-  const labels: Record<Ticket['status'], string> = {
-    purchased: '待刮开',
-    scratching: `刮奖中 ${ticket.revealedCells.length}/${ticket.cellCount}`,
-    scratched: ticket.isWinner
-      ? '已中奖待验票'
-      : '未中奖待验票',
-    queued: '等待验票',
-    verifying: '验票中',
-    completed: ticket.isWinner
-      ? '已兑奖'
-      : '验票完成',
-  };
+// 监听 Store 中当前可刮彩票的变化
+// 新彩票出现时，更新固定 ID
+watch(
+    () => store.currentTicket,
+    (value) => {
+        if (value && ["purchased", "scratching"].includes(value.status)) {
+            activeTicketId.value = value.id;
+            showScratchModal.value = true;
+        }
+    },
+    { immediate: true }
+);
 
-  return labels[ticket.status];
-}
+// 弹窗打开时锁定页面滚动
+watch(
+    () => [
+        showPlayPicker.value,
+        showMoneyModal.value,
+        showScratchModal.value
+    ],
+    ([play, money, scratch]) => {
+        lockPageScroll(Boolean(play || money || scratch));
+    },
+    { immediate: true }
+);
 
-function canOpen(ticket: Ticket) {
-  return [
-    'purchased',
-    'scratching',
-    'scratched',
-  ].includes(ticket.status);
-}
+onBeforeUnmount(() => lockPageScroll(false));
 </script>
 
 <template>
-  <section class="hero">
-    <div>
-      <p class="eyebrow">YOUR LUCKY MOMENT</p>
+    <div class="page game-page">
+        <!-- 首页头部 -->
+        <section class="hero">
+            <div>
+                <span class="eyebrow">LUCKY SCRATCH · IDLE TYCOON</span>
+                <h1>今天的好运，<em>由你开启</em></h1>
+                <p>
+                    选择彩票等级和玩法，刮开惊喜，积累财富，打造你的自动化彩票工厂。
+                </p>
+            </div>
 
-      <h1>
-        今天的好运，<em>由你开启。</em>
-      </h1>
+            <div class="hero-stamp">
+                🍀
+                <b>GOOD<br />LUCK</b>
+            </div>
+        </section>
 
-      <p class="muted">
-        亲手刮开每一个数字，全部揭晓后再提交验票，
-        奖金将在验票完成后到账。
-      </p>
+        <!-- 首页统计 -->
+        <div class="stats-grid">
+            <StatCard
+                label="可用金币"
+                :value="store.game.coins.toLocaleString()"
+                icon="🪙"
+                accent="gold"
+            />
+
+            <StatCard
+                label="待兑奖"
+                :value="store.pendingRewards.toLocaleString()"
+                icon="🎟️"
+            />
+
+            <StatCard
+                label="累计中奖"
+                :value="store.game.statistics.totalWon"
+                icon="🏆"
+            />
+
+            <StatCard
+                label="玩家等级"
+                :value="`Lv.${store.game.player.level}`"
+                icon="⭐"
+            />
+        </div>
+
+        <!-- 彩票等级选择 -->
+        <section class="panel lottery-hall">
+            <div class="section-head">
+                <div>
+                    <span class="eyebrow">CHOOSE YOUR LUCK</span>
+                    <h2>选择彩票等级</h2>
+                </div>
+
+                <span class="pill">
+                    金币 {{ store.game.coins.toLocaleString() }}
+                </span>
+            </div>
+
+            <div class="lottery-picker lottery-picker-grid">
+                <button
+                    v-for="item in store.unlockedLotteries"
+                    :key="item.id"
+                    :class="[
+                        { active: selectedLotteryId === item.id },
+                        { unaffordable: item.price > store.game.coins }
+                    ]"
+                    @click="chooseLottery(item.id)"
+                >
+                    <span class="lottery-icon">
+                        {{
+                            item.id === "free"
+                                ? "🎫"
+                                : item.id === "gold"
+                                  ? "🥇"
+                                  : item.id === "diamond"
+                                    ? "💎"
+                                    : item.id === "lucky777"
+                                      ? "🎰"
+                                      : "🎟️"
+                        }}
+                    </span>
+
+                    <b>{{ item.name }}</b>
+
+                    <strong>
+                        {{
+                            item.price === 0
+                                ? "免费"
+                                : `${item.price.toLocaleString()} 金币`
+                        }}
+                    </strong>
+
+                    <small>
+                        中奖概率
+                        {{
+                            Math.round(
+                                Math.min(
+                                    0.8,
+                                    item.baseWinRate +
+                                        store.game.talents.luck * 0.01
+                                ) * 100
+                            )
+                        }}%
+                    </small>
+
+                    <small>
+                        基础奖金 {{ item.basePrize.toLocaleString() }}
+                    </small>
+
+                    <i v-if="item.price > store.game.coins">
+                        金币不足
+                    </i>
+                    <i v-else>选择玩法 →</i>
+                </button>
+            </div>
+        </section>
+
+        <!-- 验票中心和成长进度 -->
+        <div class="game-lower-grid">
+            <aside class="side-column">
+                <section class="panel machine-mini">
+                    <div class="section-head">
+                        <div>
+                            <span class="eyebrow">VERIFY MACHINE</span>
+                            <h2>验票中心</h2>
+                        </div>
+
+                        <span class="machine-icon">⚙️</span>
+                    </div>
+
+                    <div class="machine-visual">
+                        <div class="machine-light" />
+                        <div class="machine-slot">🎟️</div>
+
+                        <b>
+                            {{
+                                store.game.machine.currentTask
+                                    ? "正在验票"
+                                    : "设备空闲"
+                            }}
+                        </b>
+
+                        <small>
+                            Lv.{{ store.game.machine.level }} · 队列
+                            {{ store.game.machine.queue.length }}/{{
+                                store.game.machine.maxQueue
+                            }}
+                        </small>
+                    </div>
+
+                    <div class="machine-footer">
+                        <span>
+                            待兑奖
+                            <b>{{ store.pendingRewards.toLocaleString() }}</b>
+                        </span>
+
+                        <span>
+                            等待任务
+                            <b>{{ store.game.machine.queue.length }}</b>
+                        </span>
+                    </div>
+                </section>
+
+                <section class="panel growth-card">
+                    <span class="eyebrow">PLAYER GROWTH</span>
+                    <h2>成长进度</h2>
+
+                    <div class="level-row">
+                        <strong>Lv.{{ store.game.player.level }}</strong>
+
+                        <span>
+                            {{ store.game.player.experience }} /
+                            {{ store.game.player.level * 100 }} EXP
+                        </span>
+                    </div>
+
+                    <div class="progress-line">
+                        <span
+                            :style="{
+                                width: `${Math.min(
+                                    100,
+                                    (store.game.player.experience /
+                                        (store.game.player.level * 100)) *
+                                        100
+                                )}%`
+                            }"
+                        />
+                    </div>
+
+                    <div class="growth-bottom">
+                        <span>可用天赋点</span>
+                        <b>✨ {{ store.game.player.talentPoints }}</b>
+                    </div>
+                </section>
+            </aside>
+        </div>
+
+        <!-- 最近的彩票 -->
+        <section class="panel recent-panel">
+            <div class="section-head">
+                <div>
+                    <span class="eyebrow">YOUR COLLECTION</span>
+                    <h2>最近的彩票</h2>
+                </div>
+
+                <span class="muted">
+                    共 {{ store.game.tickets.length }} 张
+                </span>
+            </div>
+
+            <div v-if="!store.game.tickets.length" class="empty">
+                🎟️ 还没有彩票，选择等级和玩法，开启你的第一张幸运刮刮卡吧！
+            </div>
+
+            <div v-else class="ticket-list">
+                <div
+                    v-for="t in store.game.tickets.slice(0, 5)"
+                    :key="t.id"
+                    class="ticket-row"
+                >
+                    <span class="ticket-emoji">
+                        {{ t.isWinner ? "🏆" : "🎫" }}
+                    </span>
+
+                    <div>
+                        <b>{{ t.gameName }}</b>
+                        <small>
+                            {{ new Date(t.createdAt).toLocaleString() }}
+                        </small>
+                    </div>
+
+                    <span class="status" :class="t.status">
+                        {{
+                            (
+                                {
+                                    purchased: "待刮奖",
+                                    scratching: "刮奖中",
+                                    scratched: t.isWinner ? "待验票" : "未中奖",
+                                    queued: "排队中",
+                                    verifying: "验票中",
+                                    completed: "已完成"
+                                } as Record<string, string>
+                            )[t.status]
+                        }}
+                    </span>
+
+                    <strong v-if="t.isWinner" class="reward">
+                        +{{ t.prize.toLocaleString() }}
+                    </strong>
+                </div>
+            </div>
+        </section>
     </div>
 
-    <div class="hero-stats">
-      <div>
-        <small>待兑奖</small>
-        <b>🪙 {{ game.pendingRewards.toLocaleString() }}</b>
-      </div>
-
-      <div>
-        <small>累计中奖</small>
-        <b>{{ game.state.statistics.totalWon }}</b>
-      </div>
-
-      <div>
-        <small>已刮彩票</small>
-        <b>{{ game.state.statistics.totalScratched }}</b>
-      </div>
-    </div>
-  </section>
-
-  <div class="game-grid">
-    <section class="panel lottery-panel">
-      <div class="section-heading">
-        <div>
-          <span class="eyebrow">01 / CHOOSE YOUR TICKET</span>
-          <h2>选择你的幸运彩票</h2>
-        </div>
-
-        <span class="pill">免费 + 付费</span>
-      </div>
-
-      <div class="ticket-options">
-        <article
-          v-for="item in game.lotteries"
-          :key="item.id"
-          class="ticket-option"
-          :class="{ 'free-ticket-option': item.isFree }"
-        >
-          <span class="ticket-mark">
-            {{
-              item.id === 'free'
-                ? '🍀'
-                : item.id === 'gold'
-                  ? '🏆'
-                  : item.id === 'diamond'
-                    ? '💎'
-                    : '🎰'
-            }}
-          </span>
-
-          <span class="ticket-name">
-            {{ item.name }}
-          </span>
-
-          <strong>
-            {{
-              item.isFree
-                ? '免费'
-                : `🪙 ${item.price.toLocaleString()}`
-            }}
-          </strong>
-
-          <small>
-            中奖率 {{ (item.baseWinRate * 100).toFixed(0) }}%
-          </small>
-
-          <small>
-            基础奖金 {{ item.basePrize.toLocaleString() }}
-          </small>
-
-          <button
-            v-if="item.isFree"
-            class="primary-btn ticket-action"
-            @click="startFree"
-          >
-            开始刮奖
-          </button>
-
-          <button
-            v-else
-            class="ghost-btn ticket-action"
-            :disabled="game.state.coins < item.price"
-            @click="buy(item.id)"
-          >
-            购买并刮奖
-          </button>
-        </article>
-      </div>
-
-      <div class="lottery-rule-note">
-        <b>玩法规则</b>
-
-        <span>
-          刮开三个独立数字区域，三个数字相同即可中奖；
-          777 为特殊大奖。中奖结果在创建彩票时生成并保存。
-        </span>
-      </div>
-
-      <div class="scratch-section inventory-section">
-        <div class="section-heading">
-          <div>
-            <span class="eyebrow">02 / YOUR TICKETS</span>
-            <h2>我的彩票</h2>
-          </div>
-
-          <span class="pill">
-            {{ game.state.tickets.length }} 张
-          </span>
-        </div>
-
-        <div
-          v-if="tickets.length"
-          class="inventory-list"
-        >
-          <button
-            v-for="ticket in tickets.slice(0, 12)"
-            :key="ticket.id"
-            class="inventory-ticket"
-            :class="{ 'is-actionable': canOpen(ticket) }"
-            :disabled="!canOpen(ticket)"
-            @click="openTicket(ticket)"
-          >
-            <span class="inventory-icon">
-              {{
-                ticket.isFree
-                  ? '🍀'
-                  : ticket.gameId === 'gold'
-                    ? '🏆'
-                    : ticket.gameId === 'diamond'
-                      ? '💎'
-                      : '🎰'
-              }}
-            </span>
-
-            <span class="inventory-ticket-info">
-              <b>{{ ticket.name }}</b>
-
-              <small>
-                {{ new Date(ticket.createdAt).toLocaleString() }}
-                ·
-                {{ ticket.revealedCells.length }}/{{ ticket.cellCount }}
-                已刮开
-              </small>
-            </span>
-
-            <span
-              class="inventory-ticket-status"
-              :class="ticket.status"
-            >
-              {{ statusLabel(ticket) }}
-            </span>
-
-            <span
-              v-if="canOpen(ticket)"
-              class="inventory-arrow"
-            >
-              ›
-            </span>
-          </button>
-        </div>
-
-        <div
-          v-else
-          class="empty-ticket"
-        >
-          <span>🎟️</span>
-          <strong>还没有彩票</strong>
-          <small>
-            点击上方「开始刮奖」，免费领取你的第一张幸运小票
-          </small>
-        </div>
-      </div>
-    </section>
-
-    <aside class="side-column">
-      <section class="panel machine-card">
-        <div class="section-heading">
-          <div>
-            <span class="eyebrow">03 / VERIFY</span>
-            <h2>验票机</h2>
-          </div>
-
-          <span class="status-dot">运行中</span>
-        </div>
-
-        <div class="machine-visual">
-          <span class="machine-icon">🎰</span>
-
-          <div>
-            <b>
-              {{
-                game.state.machine.currentTask
-                  ? '正在验票'
-                  : '等待任务'
-              }}
-            </b>
-
-            <small>
-              {{
-                game.state.machine.currentTask
-                  ? '验票完成后自动结算'
-                  : '完整刮开的彩票都可以提交验票'
-              }}
-            </small>
-          </div>
-        </div>
-
-        <div class="machine-metrics">
-          <div>
-            <small>等待队列</small>
-            <b>{{ game.state.machine.queue.length }} / 5</b>
-          </div>
-
-          <div>
-            <small>待兑奖金额</small>
-            <b>🪙 {{ game.pendingRewards.toLocaleString() }}</b>
-          </div>
-        </div>
-
-        <RouterLink
-          to="/machine"
-          class="text-link"
-        >
-          查看验票队列 →
-        </RouterLink>
-      </section>
-
-      <section class="panel talent-card">
-        <span class="eyebrow">GROW YOUR LUCK</span>
-
-        <h2>天赋成长</h2>
-
-        <p class="muted">
-          幸运提高中奖概率，财富提高最终奖金，
-          效率缩短自动刮奖间隔。
-        </p>
-
-        <div class="talent-mini">
-          <span>🍀 幸运等级</span>
-          <b>Lv.{{ game.state.talents.luck }}</b>
-        </div>
-
-        <div class="talent-mini">
-          <span>💰 财富等级</span>
-          <b>Lv.{{ game.state.talents.wealth }}</b>
-        </div>
-
-        <div class="talent-mini">
-          <span>⚡ 效率等级</span>
-          <b>Lv.{{ game.state.talents.efficiency }}</b>
-        </div>
-
-        <RouterLink
-          to="/talents"
-          class="text-link"
-        >
-          查看天赋详情 →
-        </RouterLink>
-      </section>
-    </aside>
-  </div>
-
-  <section class="recent panel">
-    <div class="section-heading">
-      <div>
-        <span class="eyebrow">HISTORY</span>
-        <h2>最近的彩票记录</h2>
-      </div>
-
-      <span class="muted">
-        {{ game.state.tickets.length }} 张
-      </span>
-    </div>
-
+    <!-- 玩法选择弹窗 -->
     <div
-      v-if="tickets.length"
-      class="history-list"
+        v-if="showPlayPicker"
+        class="modal-backdrop game-modal-backdrop"
+        @click.self="showPlayPicker = false"
     >
-      <div
-        v-for="ticket in tickets.slice(0, 5)"
-        :key="ticket.id"
-        class="history-row"
-      >
-        <span class="history-icon">
-          {{ ticket.isFree ? '🍀' : '🎟️' }}
-        </span>
+        <section class="panel game-dialog play-picker-dialog">
+            <button
+                class="modal-close"
+                @click="showPlayPicker = false"
+            >
+                ×
+            </button>
 
-        <div>
-          <b>{{ ticket.name }}</b>
-          <small>
-            {{ new Date(ticket.createdAt).toLocaleString() }}
-          </small>
-        </div>
+            <span class="eyebrow">SELECT GAME MODE</span>
 
-        <strong>
-          {{
-            ticket.status === 'completed'
-              ? (
-                  ticket.isWinner
-                    ? `已兑奖 +${ticket.prize}`
-                    : '验票完成'
-                )
-              : statusLabel(ticket)
-          }}
-        </strong>
-      </div>
+            <h2>选择 {{ config.name }} 的玩法</h2>
+
+            <p class="dialog-description">
+                选择一种玩法，系统会在购票时固定生成开奖结果。
+            </p>
+
+            <div class="play-picker-grid">
+                <button
+                    v-for="play in playTypes"
+                    :key="play.id"
+                    @click="buy(play.id)"
+                >
+                    <span>{{ play.icon }}</span>
+
+                    <div>
+                        <b>{{ play.name }}</b>
+                        <small>{{ play.description }}</small>
+                    </div>
+
+                    <strong>›</strong>
+                </button>
+            </div>
+
+            <div class="dialog-footer">
+                <span>
+                    票价
+                    <b>
+                        {{
+                            config.price === 0
+                                ? "免费"
+                                : `${config.price.toLocaleString()} 金币`
+                        }}
+                    </b>
+                </span>
+
+                <span>购买后立即打开刮奖窗口</span>
+            </div>
+        </section>
     </div>
 
-    <p
-      v-else
-      class="muted"
+    <!-- 金币不足弹窗 -->
+    <div
+        v-if="showMoneyModal"
+        class="modal-backdrop game-modal-backdrop"
+        @click.self="showMoneyModal = false"
     >
-      还没有彩票记录。
-    </p>
-  </section>
+        <section class="panel game-dialog money-dialog">
+            <button
+                class="modal-close"
+                @click="showMoneyModal = false"
+            >
+                ×
+            </button>
 
-  <ScratchModal
-    v-if="modalTicket"
-    :ticket="modalTicket"
-    :auto-interval-ms="autoScratchInterval"
-    @close="modalTicketId = null"
-    @reveal="reveal"
-    @submit="submitCurrentTicket"
-  />
+            <div class="money-icon">🪙</div>
+
+            <h2>金币不足</h2>
+
+            <p>
+                购买「{{ insufficientLottery.name }}」需要
+                <b>
+                    {{ insufficientLottery.price.toLocaleString() }}
+                </b>
+                金币，你目前只有
+                <b>{{ store.game.coins.toLocaleString() }}</b>
+                金币。
+            </p>
+
+            <button
+                class="btn primary full"
+                @click="showMoneyModal = false"
+            >
+                我知道了
+            </button>
+        </section>
+    </div>
+
+    <!-- 刮奖弹窗 -->
+    <div
+        v-if="showScratchModal && ticket"
+        class="modal-backdrop game-modal-backdrop scratch-modal-backdrop"
+        @click.self="showScratchModal = false"
+    >
+        <section class="panel game-dialog scratch-dialog">
+            <div
+                class="ticket-art scratch-ticket-modal"
+                :class="ticketConfig.theme"
+                style="
+                    -webkit-user-select: none;
+                    user-select: none;
+                    -webkit-touch-callout: none;
+                "
+                @selectstart.prevent
+                @dragstart.prevent
+            >
+                <ScratchArea
+                    :play-type="selectedPlayType"
+                    :values="ticketValues"
+                    :revealed-cells="ticket.revealedCells"
+                    :cell-progress="ticket.cellProgress"
+                    :prizes="ticketPrizes"
+                    :target="ticketTarget"
+                    @progress="updateTicketCellProgress"
+                    @reveal="reveal"
+                />
+            </div>
+        </section>
+    </div>
 </template>
-
-<style scoped>
-.ticket-options {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.ticket-option {
-  align-items: flex-start;
-  padding: 16px;
-  gap: 7px;
-}
-
-.ticket-option .ticket-mark {
-  font-size: 28px;
-}
-
-.ticket-option .ticket-name {
-  font-size: 14px;
-}
-
-.ticket-option strong {
-  font-size: 16px;
-  color: #f5c86b;
-}
-
-.ticket-option small {
-  font-size: 11px;
-}
-
-.ticket-action {
-  width: 100%;
-  margin-top: 7px;
-  padding: 10px 8px;
-  font-size: 11px;
-}
-
-.free-ticket-option {
-  border-color: #b68b3d;
-  background: linear-gradient(145deg, #443b2a, #1d3044);
-}
-
-.lottery-rule-note {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-top: 17px;
-  padding: 13px 15px;
-  border: 1px solid #394c63;
-  border-radius: 12px;
-  background: #17283e;
-  color: #94a7bf;
-  font-size: 11px;
-  line-height: 1.7;
-}
-
-.lottery-rule-note b {
-  color: #f1c66c;
-  font-size: 12px;
-}
-
-.inventory-section {
-  margin-top: 24px;
-}
-
-.inventory-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.inventory-ticket {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 12px;
-  border: 1px solid #30445c;
-  border-radius: 12px;
-  background: #172940;
-  color: #e7edf6;
-  text-align: left;
-}
-
-.inventory-ticket.is-actionable {
-  cursor: pointer;
-}
-
-.inventory-ticket.is-actionable:hover {
-  border-color: #d6a94e;
-  background: #21344c;
-}
-
-.inventory-ticket:disabled {
-  opacity: .8;
-  cursor: default;
-}
-
-.inventory-icon {
-  font-size: 22px;
-}
-
-.inventory-ticket-info {
-  display: flex;
-  flex: 1;
-  min-width: 0;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.inventory-ticket-info b {
-  font-size: 12px;
-}
-
-.inventory-ticket-info small {
-  font-size: 10px;
-  color: #8397af;
-}
-
-.inventory-ticket-status {
-  font-size: 10px;
-  color: #c3cfdd;
-  white-space: nowrap;
-}
-
-.inventory-ticket-status.scratched {
-  color: #f4cb72;
-}
-
-.inventory-ticket-status.completed {
-  color: #7fd2a1;
-}
-
-.inventory-arrow {
-  font-size: 20px;
-  color: #e9bd61;
-}
-
-.empty-ticket {
-  min-height: 160px;
-}
-
-.scratch-section {
-  border-top: 1px solid #2b3c51;
-  padding-top: 22px;
-  margin-top: 8px;
-}
-
-@media (max-width: 560px) {
-  .ticket-options {
-    grid-template-columns: 1fr;
-  }
-
-  .inventory-ticket {
-    gap: 7px;
-    padding: 10px;
-  }
-
-  .inventory-ticket-status {
-    font-size: 9px;
-  }
-}
-</style>
